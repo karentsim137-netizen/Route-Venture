@@ -1,15 +1,30 @@
 # app.py - Main Flask application for Route Venture
 
-from flask import Flask, render_template, request, jsonify, redirect, url_for, send_file
+from flask import Flask, render_template, request, jsonify, redirect, url_for, send_file, session, flash
 import database as db
 from config import config
+import hashlib
+from functools import wraps
 
 app = Flask(__name__)
 app.config.from_object(config['development'])
+app.secret_key = app.config.get('SECRET_KEY', 'dev-secret')
 
 # Initialize database on startup
 with app.app_context():
     db.init_db()
+
+# Stored admin password hash (sha256 of the admin password)
+# Use the precomputed hash instead of keeping plaintext in the repo
+ADMIN_PASSWORD_HASH = '49e4ada84ee0f75f2709fe884a11432892ad13157080d455786f83f8a289b19d'
+
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not session.get('logged_in'):
+            return redirect(url_for('login', next=request.path))
+        return f(*args, **kwargs)
+    return decorated_function
 
 # ==================== QR CODE ROUTES =====================
 import qrcode
@@ -91,15 +106,48 @@ def enroll_page():
     return render_template('enroll.html')
 
 @app.route('/create')
+@login_required
 def create():
     """Create event page - now accessed via admin dashboard"""
-    # Optional: Add authentication check here in production
     return render_template('create.html')
 
 @app.route('/admin')
+@login_required
 def admin_page():
     """Admin dashboard page"""
     return render_template('admin.html')
+
+# Login routes
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        # support form (HTML) and JSON (API) payloads
+        password = request.form.get('password') or (request.get_json() or {}).get('password')
+        if not password:
+            flash('Password is required', 'danger')
+            return redirect(url_for('login'))
+
+        pw = password.strip()
+        # If the client already sent a sha256 hex (64 hex chars), accept it directly.
+        if len(pw) == 64 and all(c in '0123456789abcdefABCDEF' for c in pw):
+            pw_hash = pw.lower()
+        else:
+            pw_hash = hashlib.sha256(pw.encode()).hexdigest()
+
+        if pw_hash == ADMIN_PASSWORD_HASH:
+            session['logged_in'] = True
+            next_page = request.args.get('next') or request.form.get('next') or url_for('admin_page')
+            return redirect(next_page)
+        else:
+            flash('Invalid password', 'danger')
+            return redirect(url_for('login'))
+    # GET
+    return render_template('login.html')
+
+@app.route('/logout')
+def logout():
+    session.pop('logged_in', None)
+    return redirect(url_for('index'))
 
 # ==================== USER API ENDPOINTS ====================
 
